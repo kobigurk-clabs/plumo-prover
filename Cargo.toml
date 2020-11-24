@@ -9,10 +9,12 @@ edition = "2018"
 ethers-core = { path = "../ethers-rs/ethers-core", features = ["celo"] }
 ethers-providers = { path = "../ethers-rs/ethers-providers", features = ["celo", "ws"] }
 
-bls-crypto = { git = "https://github.com/celo-org/celo-bls-snark-rs" }
-epoch-snark = { git = "https://github.com/celo-org/celo-bls-snark-rs" }
-algebra-core = { git = "https://github.com/scipr-lab/zexe", features = ["parallel"] }
-groth16 = { git = "https://github.com/scipr-lab/zexe", features = ["parallel"] }
+bls-crypto = { path = "../celo-bls-snark-rs/crates/bls-crypto" }
+bls-gadgets = { path = "../celo-bls-snark-rs/crates/bls-gadgets" }
+bls-snark-sys = { path = "../celo-bls-snark-rs/crates/bls-snark-sys" }
+epoch-snark = { path = "../celo-bls-snark-rs/crates/epoch-snark" }
+algebra-core = { git = "https://github.com/celo-org/zexe", features = ["parallel"] }
+groth16 = { git = "https://github.com/celo-org/zexe", features = ["parallel"] }
 
 gumdrop = "0.8.0"
 tracing-subscriber = "0.2.6"
