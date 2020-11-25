@@ -70,133 +70,108 @@ async fn main() -> anyhow::Result<()> {
 
     // parse the cli args
     let opts = PlumoOpts::parse_args_default_or_exit();
-    // let maximum_non_signers = opts.maximum_non_signers;
-    // let num_validators = opts.num_validators;
+    // TODO(lucas): Calculate instead
+    let maximum_non_signers = opts.maximum_non_signers;
+    let epoch_duration = opts.epoch_duration as u64;
+    let num_validators = opts.num_validators;
+    let max_validators = opts.max_validators;
 
-    let provider = Arc::new(Provider::<Http>::try_from("http://127.0.0.1:8545")?);
+    let provider = Arc::new(Provider::<Http>::try_from(opts.node_url)?);
 
-        let futs = (55u64..65)
-            .step_by(1)
-            .enumerate()
-            .map(|(i, epoch_index)| {
-                let provider = provider.clone();
-                async move {
-                    let epoch = 10;
-                    let previous_num = (epoch_index-1)*epoch;
-                    let num = epoch_index*epoch;
-                    println!("nums: {}, {}", previous_num, num);
+    let futs = (opts.start_block..=opts.end_block)
+        .step_by(epoch_duration as usize)
+        .enumerate()
+        .map(|(i, num)| {
+            let provider = provider.clone();
+            async move {
+                // Previous epoch block number
+                let previous_num = num - epoch_duration;
+                let block = provider.get_block(num).await.expect("could not get block");
+                let parent_block = provider.get_block(previous_num).await.expect("could not get parent epoch block");
+                let previous_validators = provider.get_validators_bls_public_keys(format!("0x{:x}", previous_num+1)).await.expect("could not get validators");
+                let previous_validators_keys = previous_validators.into_iter().map(|s| BlsPubkey::deserialize(&mut hex::decode(&s[2..]).expect("Deserialize 1").as_slice())).collect::<Result<Vec<_>, _>>().unwrap();
+                let validators = provider.get_validators_bls_public_keys(format!("0x{:x}", num+1)).await.expect("could not get validators");
+                let validators_keys = validators.into_iter().map(|s| BlsPubkey::deserialize(&mut hex::decode(&s[2..]).unwrap().as_slice())).collect::<Result<Vec<_>, _>>().unwrap();
 
-                    let block = provider.get_block(num).await.expect("could not get block");
-                    let parent_block = provider.get_block(num - epoch).await.expect("could not get parent epoch block");
-                    let previous_validators = provider.get_validators_bls_public_keys(format!("0x{:x}", previous_num+1)).await.expect("could not get validators");
-                    let previous_validators_keys = previous_validators.into_iter().map(|s| BlsPubkey::deserialize(&mut hex::decode(&s[2..]).expect("Deserialize 1").as_slice())).collect::<Result<Vec<_>, _>>().expect("COllection 1");
-                    let validators = provider.get_validators_bls_public_keys(format!("0x{:x}", num+1)).await.expect("could not get validators");
-                    let validators_keys = validators.into_iter().map(|s| BlsPubkey::deserialize(&mut hex::decode(&s[2..]).expect("Second deserialize").as_slice())).collect::<Result<Vec<_>, _>>().expect("Collection");
+                // Get the bitmap / signature
+                let bitmap = {
+                    let bitmap_num = U256::from(&block.epoch_snark_data.bitmap.0[..]);
+                    let mut bitmap = Vec::new();
+                    for i in 0..validators_keys.len() {
+                        bitmap.push(bitmap_num.bit(i));
+                    }
+                    bitmap
+                };
 
-                    let max_validators = 150;
+                let signature = block.epoch_snark_data.signature;
+                let aggregate_signature = Signature::deserialize(&mut &signature.0[..])
+                    .expect("could not deserialize signature - your header snark data is corrupt");
 
-                    // Get the bitmap / signature
-                    let bitmap = {
-                        let bitmap_num = U256::from(&block.epoch_snark_data.bitmap.0[..]);
-                        let mut bitmap = Vec::new();
-                        for i in 0..1 {
-                            bitmap.push(bitmap_num.bit(i));
-                        }
-                        bitmap
-                    };
-                    // println!("bitmap: {:?}", bitmap);
+                let block_hash = block.hash.unwrap();
+                let parent_hash = parent_block.hash.unwrap();
+                let entropy = Some(block_hash[..EpochBlock::ENTROPY_BYTES].to_vec());
+                let parent_entropy = Some(parent_hash[..EpochBlock::ENTROPY_BYTES].to_vec());
+                let epoch_index = num / epoch_duration;
+                println!("Epoch block index: {}, num {} previous_num: {}", epoch_index, num, previous_num);
 
-                    let signature = block.epoch_snark_data.signature;
-                    let aggregate_signature = Signature::deserialize(&mut &signature.0[..])
-                        .expect("could not deserialize signature - your header snark data is corrupt");
-                    // println!("Aggregated signature {:?}", aggregate_signature);
-
-                    let block_hash = block.hash.unwrap();
-                    let parent_hash = parent_block.hash.unwrap();
-                    let entropy = unsafe { Some(slice::from_raw_parts(block_hash.as_ptr(), EpochBlock::ENTROPY_BYTES).to_vec()) };
-                    let parent_entropy = unsafe { Some(slice::from_raw_parts(parent_hash.as_ptr(), EpochBlock::ENTROPY_BYTES).to_vec()) };
-                    // println!("Entropy {:?}", entropy);
-                    // println!("Parent Entropy {:?}", parent_entropy);
-
-                    //for i in 0..100 {
-                    let i = 0;
-                        let epoch_block = EpochBlock {
-                            index: epoch_index as u16,
-                            round: 0,
-                            epoch_entropy: entropy,
-                            parent_entropy: parent_entropy,
-                            maximum_non_signers: 0,
-                            maximum_validators: max_validators,
-                            new_public_keys: validators_keys.clone(),
-                        };
-                        println!("Epoch block {:?}", epoch_block);
-                        // let bytes: &[u8];
-                        // let extra_data;// = epoch_block.encode_inner_epoch_to_bytes_cip22().unwrap();
-                        let (mut encoded_inner, mut encoded_extra_data) =
-                                epoch_block.encode_inner_to_bytes_cip22().unwrap();
-                        // unsafe {
-                        //     *bytes = encoded_inner.as_mut_ptr();
-                        //     *extra_data = encoded_extra_data.as_mut_ptr();
-                        // }
-                        let mut participating_keys = vec![];
-                        for (j, b) in bitmap.iter().enumerate() {
-                            if *b {
-                                participating_keys.push(previous_validators_keys[j].clone());
-                            }
-                        }
-                        let aggregated_key = BlsPubkey::aggregate(&participating_keys);
-                        let res = aggregated_key.verify(
-                            &encoded_inner,
-                            &encoded_extra_data,
-                            &aggregate_signature,
-                            &*COMPOSITE_HASH_TO_G1_CIP22,
-                        ).expect("AGgregated key verify");
-                    //}
-                    
-                    // construct the epoch block transition
-                    EpochTransition {
-                        block: EpochBlock {
-                            index: epoch_index as u16,
-                            round: 0,
-                            epoch_entropy: None,
-                            parent_entropy: None,
-                            maximum_non_signers: 0,
-                            maximum_validators: max_validators,
-                            new_public_keys: validators_keys,
-                        },
-                        aggregate_signature,
-                        bitmap,
+                let epoch_block = EpochBlock {
+                    index: epoch_index as u16,
+                    round: 0,
+                    epoch_entropy: entropy,
+                    parent_entropy: parent_entropy,
+                    maximum_non_signers: maximum_non_signers,
+                    maximum_validators: max_validators as usize,
+                    new_public_keys: validators_keys.clone(),
+                };
+                let (mut encoded_inner, mut encoded_extra_data) =
+                        epoch_block.encode_inner_to_bytes_cip22().unwrap();
+                let mut participating_keys = vec![];
+                for (j, b) in bitmap.iter().enumerate() {
+                    if *b {
+                        participating_keys.push(previous_validators_keys[j].clone());
                     }
                 }
-            })
-            .collect::<Vec<_>>();
+                let aggregated_key = BlsPubkey::aggregate(&participating_keys);
+                let res = aggregated_key.verify(
+                    &encoded_inner,
+                    &encoded_extra_data,
+                    &aggregate_signature,
+                    &*COMPOSITE_HASH_TO_G1_CIP22,
+                ).expect("Aggregated key failed to verify");
+                    
+                // construct the epoch block transition
+                EpochTransition {
+                    block: epoch_block,
+                    aggregate_signature,
+                    bitmap,
+                }
+            }
+        })
+        .collect::<Vec<_>>();
 
-    for epoch_index in 55u64..65 {
-        println!("epoch {}", epoch_index);
-    }
+            let mut transitions = futures_util::future::join_all(futs).await;
+            let first_epoch = transitions.remove(0).block;
+            println!("First epoch {:?}", first_epoch);
+            let last_epoch = transitions.iter().last().unwrap().block.clone();
+            println!("Last epoch {:?}", last_epoch);
+            let num_transitions = 1;
+            let epoch_proving_key = trusted_setup(max_validators as usize, num_transitions, maximum_non_signers as usize, &mut rand::thread_rng(), false)
+            .expect("Failed running trusted setup").epochs;
 
-        let mut transitions = futures_util::future::join_all(futs).await;
-        let first_epoch = transitions.remove(0).block;
-        let last_epoch = transitions.iter().last().unwrap().block.clone();
-        let num_transitions = 10;
-        let num_validators = 1u32;
-        println!("Running trusted setup");
-        let epoch_proving_key = trusted_setup(num_validators as usize, num_transitions, 0, &mut rand::thread_rng(), false)
-        .expect("Could not verify").epochs;
-        println!("Finished trusted setup");
+            let parameters = Parameters {
+                epochs: epoch_proving_key,
+                hash_to_bits: None,
+            };
+            let proof = prove(&parameters, max_validators, &first_epoch, &transitions, num_transitions)
+                .expect("could not generate zkp");
 
-        let parameters = Parameters {
-            epochs: epoch_proving_key,
-            hash_to_bits: None,
-        };
-        let proof = prove(&parameters, num_validators, &first_epoch, &transitions, num_transitions)
-            .expect("could not generate zkp");
+            let mut file = BufWriter::new(File::create("./proof")?);
+            proof.serialize(&mut file)?;
 
-        let mut file = BufWriter::new(File::create("./proof")?);
-        proof.serialize(&mut file)?;
+            println!("Proof generated Ok!");
 
-        println!("OK!");
-        Ok(())
+            verify(&parameters.epochs.vk, &first_epoch, &last_epoch, &proof).expect("Proof could not be verified");
+            Ok(())
 
         // println!("firstEpoch {:?}\n num_validators: {:?}\n transitions {:?}\n lastEpoch: {:?}", first_epoch, num_validators, transitions, last_epoch);
         // let first_proof = prove(&parameters, num_validators, &first_epoch, &transitions[0..8], num_transitions)
@@ -209,7 +184,6 @@ async fn main() -> anyhow::Result<()> {
         // let second_proof = prove(&parameters, num_validators, &first_last_epoch, &transitions[7..], num_transitions)
         //     .expect("could not generate zkp");
 
-        // verify(&parameters.epochs.vk, &first_epoch, &first_last_epoch, &first_proof).expect("Proof could not be verified");
         // verify(&parameters.epochs.vk, &first_last_epoch, &last_epoch, &second_proof).expect("Proof could not be verified");
 
         // let mut first_serialized_proof = vec![];
