@@ -13,6 +13,7 @@ bls-crypto = { path = "../celo-bls-snark-rs/crates/bls-crypto" }
 bls-gadgets = { path = "../celo-bls-snark-rs/crates/bls-gadgets" }
 bls-snark-sys = { path = "../celo-bls-snark-rs/crates/bls-snark-sys" }
 epoch-snark = { path = "../celo-bls-snark-rs/crates/epoch-snark" }
+algebra = { git = "https://github.com/celo-org/zexe", features = ["bls12_377"] }
 algebra-core = { git = "https://github.com/celo-org/zexe", features = ["parallel"] }
 groth16 = { git = "https://github.com/celo-org/zexe", features = ["parallel"] }
 

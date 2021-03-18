@@ -1,3 +1,4 @@
+use algebra::{ProjectiveCurve, bls12_377::G2Projective};
 use algebra_core::{CanonicalDeserialize, CanonicalSerialize};
 use groth16::Parameters as Groth16Parameters;
 use bls_crypto::{PublicKey as BlsPubkey, Signature, hash_to_curve::try_and_increment::COMPOSITE_HASH_TO_G1, hash_to_curve::try_and_increment_cip22::COMPOSITE_HASH_TO_G1_CIP22};
@@ -97,8 +98,8 @@ async fn main() -> anyhow::Result<()> {
                 let bitmap = {
                     let bitmap_num = U256::from(&block.epoch_snark_data.bitmap.0[..]);
                     let mut bitmap = Vec::new();
-                    for i in 0..validators_keys.len() {
-                        bitmap.push(bitmap_num.bit(i));
+                    for i in 0..max_validators { //validators_keys.len() {
+                        bitmap.push(bitmap_num.bit(i as usize));
                     }
                     bitmap
                 };
@@ -114,6 +115,16 @@ async fn main() -> anyhow::Result<()> {
                 let epoch_index = num / epoch_duration;
                 println!("Epoch block index: {}, num {} previous_num: {}", epoch_index, num, previous_num);
 
+                let mut new_public_keys = validators_keys.clone();
+                if max_validators > new_public_keys.len() as u32 {
+                    let difference = max_validators - new_public_keys.len() as u32;
+                    let generator = BlsPubkey::from(G2Projective::prime_subgroup_generator());
+                    for _ in 0..difference {
+                        new_public_keys.push(generator.clone());
+                    }
+                }
+                println!("new pub keys len {}", new_public_keys.len());
+
                 let epoch_block = EpochBlock {
                     index: epoch_index as u16,
                     round: 0,
@@ -121,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
                     parent_entropy: parent_entropy,
                     maximum_non_signers: maximum_non_signers,
                     maximum_validators: max_validators as usize,
-                    new_public_keys: validators_keys.clone(),
+                    new_public_keys: new_public_keys,
                 };
                 let (mut encoded_inner, mut encoded_extra_data) =
                         epoch_block.encode_inner_to_bytes_cip22().unwrap();
@@ -149,29 +160,27 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect::<Vec<_>>();
 
-            let mut transitions = futures_util::future::join_all(futs).await;
-            let first_epoch = transitions.remove(0).block;
-            println!("First epoch {:?}", first_epoch);
-            let last_epoch = transitions.iter().last().unwrap().block.clone();
-            println!("Last epoch {:?}", last_epoch);
-            let num_transitions = 1;
-            let epoch_proving_key = trusted_setup(max_validators as usize, num_transitions, maximum_non_signers as usize, &mut rand::thread_rng(), false)
-            .expect("Failed running trusted setup").epochs;
+        let mut transitions = futures_util::future::join_all(futs).await;
+        let first_epoch = transitions.remove(0).block;
+        let last_epoch = transitions.iter().last().unwrap().block.clone();
+        let num_transitions = 1;
+        let epoch_proving_key = trusted_setup(max_validators as usize, num_transitions, maximum_non_signers as usize, &mut rand::thread_rng(), false)
+        .expect("Failed running trusted setup").epochs;
 
-            let parameters = Parameters {
-                epochs: epoch_proving_key,
-                hash_to_bits: None,
-            };
-            let proof = prove(&parameters, max_validators, &first_epoch, &transitions, num_transitions)
-                .expect("could not generate zkp");
+        let parameters = Parameters {
+            epochs: epoch_proving_key,
+            hash_to_bits: None,
+        };
+        let proof = prove(&parameters, max_validators, &first_epoch, &transitions, num_transitions)
+            .expect("could not generate zkp");
 
-            let mut file = BufWriter::new(File::create("./proof")?);
-            proof.serialize(&mut file)?;
+        let mut file = BufWriter::new(File::create("./proof")?);
+        proof.serialize(&mut file)?;
 
-            println!("Proof generated Ok!");
+        println!("Proof generated Ok!");
 
-            verify(&parameters.epochs.vk, &first_epoch, &last_epoch, &proof).expect("Proof could not be verified");
-            Ok(())
+        verify(&parameters.epochs.vk, &first_epoch, &last_epoch, &proof).expect("Proof could not be verified");
+        Ok(())
 
         // println!("firstEpoch {:?}\n num_validators: {:?}\n transitions {:?}\n lastEpoch: {:?}", first_epoch, num_validators, transitions, last_epoch);
         // let first_proof = prove(&parameters, num_validators, &first_epoch, &transitions[0..8], num_transitions)
