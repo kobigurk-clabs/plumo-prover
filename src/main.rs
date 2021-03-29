@@ -4,7 +4,6 @@ use groth16::Parameters as Groth16Parameters;
 use bls_crypto::{PublicKey as BlsPubkey, Signature, hash_to_curve::try_and_increment::COMPOSITE_HASH_TO_G1, hash_to_curve::try_and_increment_cip22::COMPOSITE_HASH_TO_G1_CIP22};
 use std::slice;
 
-
 use epoch_snark::{trusted_setup, prove, verify, BLSCurve, EpochBlock, EpochTransition, Parameters};
 
 use ethers_core::{types::U256, utils::rlp};
@@ -87,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
             async move {
                 // Previous epoch block number
                 let previous_num = num - epoch_duration;
-                let block = provider.get_block(num).await.expect("could not get block");
+                let block = provider.get_block(num).await.expect("could not get block").unwrap();
                 let parent_block = provider.get_block(previous_num).await.expect("could not get parent epoch block");
                 let previous_validators = provider.get_validators_bls_public_keys(format!("0x{:x}", previous_num+1)).await.expect("could not get validators");
                 let previous_validators_keys = previous_validators.into_iter().map(|s| BlsPubkey::deserialize(&mut hex::decode(&s[2..]).expect("Deserialize 1").as_slice())).collect::<Result<Vec<_>, _>>().unwrap();
@@ -96,20 +95,23 @@ async fn main() -> anyhow::Result<()> {
 
                 // Get the bitmap / signature
                 let bitmap = {
-                    let bitmap_num = U256::from(&block.epoch_snark_data.bitmap.0[..]);
+                    let bitmap_num = U256::from(&block.epoch_snark_data.as_ref().unwrap().bitmap.0[..]);
+                    println!("bitmap 1: {:?}", &block.epoch_snark_data.as_ref().unwrap().bitmap);
+                    println!("bitmap 2: {}", bitmap_num);
                     let mut bitmap = Vec::new();
                     for i in 0..max_validators { //validators_keys.len() {
                         bitmap.push(bitmap_num.bit(i as usize));
                     }
+                    println!("bitmap 3: {:?}", bitmap);
                     bitmap
                 };
 
-                let signature = block.epoch_snark_data.signature;
+                let signature = &block.epoch_snark_data.as_ref().unwrap().signature;
                 let aggregate_signature = Signature::deserialize(&mut &signature.0[..])
                     .expect("could not deserialize signature - your header snark data is corrupt");
 
                 let block_hash = block.hash.unwrap();
-                let parent_hash = parent_block.hash.unwrap();
+                let parent_hash = parent_block.unwrap().hash.unwrap();
                 let entropy = Some(block_hash[..EpochBlock::ENTROPY_BYTES].to_vec());
                 let parent_entropy = Some(parent_hash[..EpochBlock::ENTROPY_BYTES].to_vec());
                 let epoch_index = num / epoch_duration;
@@ -118,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut new_public_keys = validators_keys.clone();
                 if max_validators > new_public_keys.len() as u32 {
                     let difference = max_validators - new_public_keys.len() as u32;
+                    println!("difference: {}", difference);
                     let generator = BlsPubkey::from(G2Projective::prime_subgroup_generator());
                     for _ in 0..difference {
                         new_public_keys.push(generator.clone());
@@ -125,37 +128,44 @@ async fn main() -> anyhow::Result<()> {
                 }
                 println!("new pub keys len {}", new_public_keys.len());
 
-                let epoch_block = EpochBlock {
-                    index: epoch_index as u16,
-                    round: 0,
-                    epoch_entropy: entropy,
-                    parent_entropy: parent_entropy,
-                    maximum_non_signers: maximum_non_signers,
-                    maximum_validators: max_validators as usize,
-                    new_public_keys: new_public_keys,
-                };
-                let (mut encoded_inner, mut encoded_extra_data) =
-                        epoch_block.encode_inner_to_bytes_cip22().unwrap();
-                let mut participating_keys = vec![];
-                for (j, b) in bitmap.iter().enumerate() {
-                    if *b {
-                        participating_keys.push(previous_validators_keys[j].clone());
+                let max_non_signers = (max_validators - ((2*validators_keys.len()+2) as u32)/3) as u32;
+                println!("maximum non signers: {}", max_non_signers);
+                for round in 0..=100 {
+                    let epoch_block = EpochBlock {
+                        index: epoch_index as u16,
+                        round: round,
+                        epoch_entropy: entropy.clone(),
+                        parent_entropy: parent_entropy.clone(),
+                        maximum_non_signers: max_non_signers,
+                        maximum_validators: max_validators as usize,
+                        new_public_keys: new_public_keys.clone(),
+                    };
+                    let (mut encoded_inner, mut encoded_extra_data) =
+                            epoch_block.encode_inner_to_bytes_cip22().unwrap();
+                    let mut participating_keys = vec![];
+                    for (j, b) in bitmap.iter().enumerate() {
+                        if *b {
+                            participating_keys.push(previous_validators_keys[j].clone());
+                        }
+                    }
+                    let aggregated_key = BlsPubkey::aggregate(&participating_keys);
+                    let res = aggregated_key.verify(
+                        &encoded_inner,
+                        &encoded_extra_data,
+                        &aggregate_signature,
+                        &*COMPOSITE_HASH_TO_G1_CIP22,
+                    );
+                    if res.is_ok() {
+                        println!("transition on block {} ok with round {}", num, round);
+                        // construct the epoch block transition
+                        return EpochTransition {
+                            block: epoch_block.clone(),
+                            aggregate_signature: aggregate_signature.clone(),
+                            bitmap: bitmap.clone(),
+                        };
                     }
                 }
-                let aggregated_key = BlsPubkey::aggregate(&participating_keys);
-                let res = aggregated_key.verify(
-                    &encoded_inner,
-                    &encoded_extra_data,
-                    &aggregate_signature,
-                    &*COMPOSITE_HASH_TO_G1_CIP22,
-                ).expect("Aggregated key failed to verify");
-                    
-                // construct the epoch block transition
-                EpochTransition {
-                    block: epoch_block,
-                    aggregate_signature,
-                    bitmap,
-                }
+                panic!("Should have found a compatible round");
             }
         })
         .collect::<Vec<_>>();
@@ -163,19 +173,25 @@ async fn main() -> anyhow::Result<()> {
         let mut transitions = futures_util::future::join_all(futs).await;
         let first_epoch = transitions.remove(0).block;
         let last_epoch = transitions.iter().last().unwrap().block.clone();
-        let num_transitions = 1;
+        let num_transitions = transitions.len();
+        println!("BEGIN setup");
         let epoch_proving_key = trusted_setup(max_validators as usize, num_transitions, maximum_non_signers as usize, &mut rand::thread_rng(), false)
         .expect("Failed running trusted setup").epochs;
+        println!("END setup");
 
         let parameters = Parameters {
             epochs: epoch_proving_key,
             hash_to_bits: None,
         };
+        println!("BEGIN prove");
         let proof = prove(&parameters, max_validators, &first_epoch, &transitions, num_transitions)
             .expect("could not generate zkp");
+        println!("END prove");
 
+        println!("BEGIN prove serialize");
         let mut file = BufWriter::new(File::create("./proof")?);
         proof.serialize(&mut file)?;
+        println!("END prove serialize");
 
         println!("Proof generated Ok!");
 
